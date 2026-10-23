@@ -1,5 +1,6 @@
 """Run after approved infrastructure setup and private image upload."""
 import sys,json,pathlib,datetime as dt
+sys.path.insert(0,'..')
 from oci_local_access import *
 import oci.resource_scheduler as scheduler
 
@@ -24,6 +25,11 @@ for role,memory,timeout in [('web',256,30),('api',512,60),('collector',1024,300)
         freeform_tags={'application':'oci-limits-dashboard','role':role})
     ensure(key,lambda d=details:fc.create_function(d).data)
     oci.wait_until(fc,fc.get_function(state[key]),'lifecycle_state','ACTIVE',max_wait_seconds=300)
+api_response=fc.get_function(state['api_function_id'])
+collector=fc.get_function(state['collector_function_id']).data
+fc.update_function(state['api_function_id'],oci.functions.models.UpdateFunctionDetails(config={
+    **api_response.data.config, 'COLLECTOR_FUNCTION_ID':collector.id,
+    'COLLECTOR_INVOKE_ENDPOINT':collector.invoke_endpoint}),if_match=api_response.headers['etag'])
 for role in ['collector','api']:
     ensure(role+'_dynamic_group_id',lambda role=role:identity.create_dynamic_group(oci.identity.models.CreateDynamicGroupDetails(
         compartment_id=state['tenancy_id'],name='oci-limits-'+role,description='Only the OCI limits '+role+' function',
@@ -32,7 +38,8 @@ statements=[
     'Allow dynamic-group oci-limits-collector to read limits in tenancy',
     'Allow dynamic-group oci-limits-collector to inspect resource-availability in tenancy',
     'Allow dynamic-group oci-limits-collector to read resource-availability in tenancy',
-    f"Allow dynamic-group oci-limits-collector to {{OBJECT_CREATE, OBJECT_OVERWRITE}} in compartment Sandbox where target.bucket.name='{state['bucket']}'",
+    f"Allow dynamic-group oci-limits-collector to {{OBJECT_READ, OBJECT_CREATE, OBJECT_OVERWRITE}} in compartment Sandbox where target.bucket.name='{state['bucket']}'",
+    f"Allow dynamic-group oci-limits-api to use fn-invocation in compartment Sandbox where target.function.id='{state['collector_function_id']}'",
     f"Allow dynamic-group oci-limits-api to {{OBJECT_READ}} in compartment Sandbox where target.bucket.name='{state['bucket']}'",
     f"Allow any-user to use fn-invocation in compartment Sandbox where all {{request.principal.type='ApiGateway', request.principal.id='{state['gateway_id']}', any {{target.function.id='{state['web_function_id']}', target.function.id='{state['api_function_id']}'}}}}",
 ]

@@ -110,28 +110,74 @@ def object_store():
 def snapshot_object(name='snapshot.json'):
     return (os.environ['STORAGE_NAMESPACE'], os.environ['SNAPSHOT_BUCKET'], name)
 
+def refresh_state(store=None):
+    store = store or object_store()
+    try:
+        result = store.get_object(*snapshot_object('refresh-status.json'))
+        return json.loads(result.data.content), result.headers['etag']
+    except oci.exceptions.ServiceError as exc:
+        if exc.status != 404:
+            raise
+        return {'status': 'Idle'}, None
+
+def refresh_running(state):
+    if state.get('status') != 'Running':
+        return False
+    try:
+        age = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(state['started_at'])
+        return age.total_seconds() < 1200
+    except (KeyError, ValueError, TypeError):
+        return False
+
+def start_refresh():
+    state, _ = refresh_state()
+    if refresh_running(state):
+        return {**state, 'requested_at': state['started_at']}
+    requested = now()
+    # Only the exact collector configured by the deployment can be invoked.
+    signer = oci.auth.signers.get_resource_principals_signer()
+    invoke = oci.functions.FunctionsInvokeClient({}, signer=signer,
+        service_endpoint=os.environ['COLLECTOR_INVOKE_ENDPOINT'], timeout=(10, 30),
+        retry_strategy=oci.retry.NoneRetryStrategy())
+    invoke.invoke_function(os.environ['COLLECTOR_FUNCTION_ID'],
+        invoke_function_body=b'{}', fn_invoke_type='detached')
+    return {'status': 'Accepted', 'requested_at': requested}
+
 def refresh():
     store = object_store()
+    state, etag = refresh_state(store)
+    if refresh_running(state):
+        return state
+    started = now()
+    running = {'status': 'Running', 'started_at': started, 'last_attempt_at': started}
+    # A conditional write lets only one scheduled/manual invocation collect at a time.
+    try:
+        claim = store.put_object(*snapshot_object('refresh-status.json'), json.dumps(running),
+            content_type='application/json', **({'if_match': etag} if etag else {'if_none_match': '*'}))
+    except oci.exceptions.ServiceError as exc:
+        if exc.status == 412:
+            return refresh_state(store)[0]
+        raise
+    claim_etag = claim.headers['etag']
     try:
         snapshot = collect_snapshot()
         body = json.dumps(snapshot, separators=(',', ':'), allow_nan=False).encode()
         store.put_object(*snapshot_object(), body, content_type='application/json')
-        store.put_object(*snapshot_object('refresh-status.json'), json.dumps({'status': 'Succeeded', 'last_attempt_at': now()}))
+        result = {'status': 'Succeeded', 'started_at': started, 'last_attempt_at': now(),
+                  'last_pull_at': snapshot['last_pull_at'], 'record_count': snapshot['record_count']}
+        store.put_object(*snapshot_object('refresh-status.json'), json.dumps(result), if_match=claim_etag)
         LOG.info('Snapshot published: %s records', snapshot['record_count'])
-        return {'status': 'Succeeded', 'last_pull_at': snapshot['last_pull_at'], 'record_count': snapshot['record_count']}
+        return result
     except Exception:
         LOG.exception('Snapshot refresh failed; previous snapshot retained')
-        store.put_object(*snapshot_object('refresh-status.json'), json.dumps({'status': 'Failed', 'last_attempt_at': now()}))
+        store.put_object(*snapshot_object('refresh-status.json'), json.dumps({
+            'status': 'Failed', 'started_at': started, 'last_attempt_at': now()}), if_match=claim_etag)
         raise
 
 def read_snapshot():
     store = object_store()
     data = json.loads(store.get_object(*snapshot_object()).data.content)
-    try:
-        data['refresh_status'] = json.loads(store.get_object(*snapshot_object('refresh-status.json')).data.content)
-    except oci.exceptions.ServiceError as exc:
-        if exc.status != 404:
-            raise
+    data['refresh_status'] = refresh_state(store)[0]
     return data
 
 def exchange_code(payload):
@@ -232,6 +278,10 @@ def handler(ctx, data: io.BytesIO = None):
         elif role == 'api':
             if payload.get('action') == 'snapshot':
                 result = read_snapshot()
+            elif payload.get('action') == 'refresh':
+                result = start_refresh()
+            elif payload.get('action') == 'refresh-status':
+                result = refresh_state()[0]
             elif payload.get('action') == 'export':
                 snapshot = read_snapshot()
                 regions = payload.get('regions', [])

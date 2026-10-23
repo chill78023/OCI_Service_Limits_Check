@@ -35,3 +35,9 @@ The gateway uses a static copy of the domain's public verification key. When the
 Deployment helpers retain identifiers to avoid recreating tracked resources, but are not a general infrastructure reconciliation tool. In particular, existing functions are not automatically updated to a new image by `deploy_functions.py`; use the OCI Functions update API or CLI to update all three functions to the newly verified image and digest for later releases. Preserve local state securely and inspect changes before rerunning deployment scripts.
 
 OAuth authorization requests use the full scope URL, while the issued access token contains the resource-relative scope `read`. The gateway requires `read` through route authorization and independently validates the exact API audience, issuer, signature, and expiry.
+
+## Manual data refresh
+
+The authenticated **Update service limits** button invokes the collector in detached mode, then polls a small status response while retaining the previous complete snapshot. Successful completion reloads the data and last-pull timestamp. Failures retain the previous snapshot. Reloading the page resumes status monitoring for an active pull.
+
+The API function requires `COLLECTOR_FUNCTION_ID` and `COLLECTOR_INVOKE_ENDPOINT`, plus an exact-function invocation policy. The collector requires read access to its private snapshot bucket to acquire a conditional status-object lease. Conditional writes prevent concurrent scheduled and manual pulls from collecting simultaneously. A lease expires after 20 minutes, exceeding the configured 15-minute detached function timeout. Daily scheduling remains active.

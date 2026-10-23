@@ -6,6 +6,7 @@ A browser dashboard hosted on OCI Functions that shows service limits, current u
 - Filters by region, service, search text, and alerts.
 - Exports the filtered results to Excel.
 - Refreshes daily at 12:00 UTC and displays the last successful pull.
+- Pulls fresh limits and usage on demand with **Update service limits**, showing progress while the previous snapshot stays available.
 - Keeps the previous complete snapshot if collection fails.
 - Protects usage data with OCI identity-domain sign-in.
 
