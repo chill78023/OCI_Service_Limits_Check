@@ -1,0 +1,24 @@
+# Local credentials and environment
+.oci/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Private deployment state and collected data
+deployment.json
+infrastructure-inventory.json
+public-signing-keys.json
+*-state.json
+deployment-verification.json
+snapshot.json
+refresh-status.json
+outputs/
+# Generated build files
+build/
+tools/
+__pycache__/
+*.py[cod]
+base-config.json
+base-manifest.json
+.DS_Store

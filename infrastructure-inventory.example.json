@@ -1,0 +1,8 @@
+{
+  "us-ashburn-1": {
+    "subnets": [{"compartment_id": "YOUR_SANDBOX_COMPARTMENT_OCID", "vcn_id": "YOUR_FUNCTION_VCN_OCID", "display_name": "FunctionSubnet"}],
+    "gateways": [{"id": "YOUR_GATEWAY_OCID", "hostname": "YOUR_GATEWAY_HOSTNAME", "display_name": "test gateway"}]
+  },
+  "domains": [{"url": "https://YOUR_IDENTITY_DOMAIN.identity.oraclecloud.com"}],
+  "dashboard_user_name": "YOUR_OCI_SIGN_IN_USER_NAME"
+}
