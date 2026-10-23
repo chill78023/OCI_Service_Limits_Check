@@ -11,7 +11,7 @@ def blob(data):
     value=digest(data);path=LAYOUT/'blobs/sha256'/value.split(':')[1];path.write_bytes(data)
     return value,len(data)
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--push',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--push',action='store_true');parser.add_argument('--tag',default='20261023-v1');args=parser.parse_args()
     (LAYOUT/'blobs/sha256').mkdir(parents=True,exist_ok=True)
     base=json.loads((ROOT/'base-manifest.json').read_text())
     baseconfig=json.loads((ROOT/'base-config.json').read_text())
@@ -73,7 +73,7 @@ def main():
         data=(LAYOUT/'blobs/sha256'/item['digest'].split(':')[1]).read_bytes()
         result=session.put(location+separator+'digest='+urllib.parse.quote(item['digest']),headers={**push_headers,'Content-Type':'application/octet-stream'},data=data,timeout=180);result.raise_for_status()
         print('Uploaded image layer',item['digest'][:24],flush=True)
-    tag='20261023-v1'
+    tag=args.tag
     pushed=session.put(registry+'/v2/'+repository+'/manifests/'+tag,headers={**push_headers,'Content-Type':manifest['mediaType']},data=manifest_bytes,timeout=30);pushed.raise_for_status()
     state.update(image=state['image_repository']+':'+tag,image_digest=manifest_digest)
     (ROOT/'deployment.json').write_text(json.dumps(state,indent=2))

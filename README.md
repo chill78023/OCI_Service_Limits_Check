@@ -1,4 +1,4 @@
-# OCI API Limits Check
+# Service Limits Utilization Dashboard
 
 A browser dashboard hosted on OCI Functions that shows service limits, current usage, and utilization across Ashburn, Chicago, Phoenix, and Frankfurt.
 

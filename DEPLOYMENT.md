@@ -1,4 +1,4 @@
-# Deploying the OCI utilization dashboard
+# Deploying the Service Limits Utilization Dashboard
 
 The deployment helpers implement a Sandbox deployment in Ashburn. Review their resource names, region, CIDR ranges, and IAM policies before using them in another tenancy. They create cloud resources and may incur charges. Run commands from this repository root with the OCI Python SDK and pinned application dependencies installed.
 
