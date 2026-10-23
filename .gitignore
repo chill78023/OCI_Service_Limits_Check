@@ -22,3 +22,6 @@ __pycache__/
 base-config.json
 base-manifest.json
 .DS_Store
+
+# Local Python environment
+.venv/

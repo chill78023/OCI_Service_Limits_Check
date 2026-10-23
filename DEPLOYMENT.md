@@ -1,43 +1,245 @@
-# Deploying the Service Limits Utilization Dashboard
+# Install the Service Limits Utilization Dashboard on OCI
 
-The deployment helpers implement a Sandbox deployment in Ashburn. Review their resource names, region, CIDR ranges, and IAM policies before using them in another tenancy. They create cloud resources and may incur charges. Run commands from this repository root with the OCI Python SDK and pinned application dependencies installed.
+This guide installs a new instance of the application from this repository. It covers the current deployment scripts, which target **Ashburn (`us-ashburn-1`)** and a compartment named **`Sandbox`**. Existing installations should use the upgrade instructions below rather than repeat the first-install steps.
 
-## Prerequisites
+The result is a browser application with OCI sign-in, a private data snapshot, a daily refresh at **12:00 UTC**, an **Update service limits** button, and Excel export. Cloud functions use resource principals; your workstation API key stays on your workstation.
 
-- A working local OCI CLI configuration in `~/.oci/config` with sufficient permissions for Functions, networking, Object Storage, registry, IAM, identity-domain apps, API Gateway, logging, and Resource Scheduler.
-- An existing compartment named `Sandbox`, a Functions VCN with a subnet named `FunctionSubnet`, and a public gateway named `test gateway` with an Internet Gateway route.
-- Available VCN address space for `10.90.0.0/24`; the helper creates a private subnet at `10.90.0.0/25` with NAT egress.
-- An identity domain and an existing user to assign to the dashboard.
+## 1. Prepare your OCI environment
 
-Copy `infrastructure-inventory.example.json` to `infrastructure-inventory.json` and replace the placeholders with your existing resource details. This local inventory and generated `deployment.json` must remain private.
+Have a tenancy administrator and identity-domain administrator approve the deployment permissions. The deploying account must be able to create or manage Functions, container repositories, Object Storage buckets, networking, API Gateway deployments, IAM policies and dynamic groups, identity-domain applications and user grants, logs, and Resource Scheduler schedules. Creating IAM policies and dynamic groups requires tenancy-level access. These administrative permissions are for installation; the application receives narrower runtime policies.
 
-## Build and deploy
+In Ashburn, prepare these existing resources:
 
-1. Run `python inspect_build.py` to retrieve the official Fn Python 3.11 runtime manifest and configuration for AMD64.
-2. Run `python prepare_dependencies.py` to install the pinned dependencies into `build/python` for the target Linux runtime.
-3. Run `python setup_infrastructure.py` to create the Functions application, private networking, private bucket and registry, OAuth applications, and user assignment. It records resource identifiers in `deployment.json`.
-4. Obtain the identity domain's public RSA signing verification keys through authorized administrative access. Save them as a JSON Web Key Set (`{"keys": [...]}`) in the ignored `public-signing-keys.json`. Do not publish private signing material or enable domain-wide public certificate access merely for this app.
-5. Run `python package_image.py --push`. Only the three files under `function/`, pinned dependencies, and runtime layers enter the image. The credential check must pass before upload. The generated image reference and digest are saved to local deployment state.
-6. Run `python deploy_functions.py` to create the three functions, exact-resource dynamic groups, scoped runtime policies, two gateway deployments, and daily schedule.
-7. Run `python enable_logs.py` to enable invocation diagnostics. Run `python enable_gateway_https.py` to attach HTTPS ingress only after its guard confirms the gateway contains exactly the two dashboard deployments.
-8. Allow IAM changes to propagate. Invoke the collector in detached mode through OCI Functions, then verify that the private bucket contains a complete `snapshot.json` and a successful `refresh-status.json`.
+| Requirement | Value expected by the scripts |
+| --- | --- |
+| Compartment | `Sandbox` |
+| Functions network | An existing VCN with an existing subnet named `FunctionSubnet` |
+| Public API Gateway | A gateway named `test gateway`, dedicated to this application |
+| Gateway network | A public subnet with a route to an Internet Gateway |
+| Identity domain | Its HTTPS domain URL and an existing user to assign to the application |
 
-The application URL is written to local `deployment.json`. The browser path is `/oci-limits/`, and the authenticated data path is `/oci-limits-data/`.
+The gateway must start without other API deployments. The HTTPS helper refuses to attach its rule unless the gateway contains exactly this application's two deployments. The gateway can use a different VCN from the Functions VCN.
 
-## Verification and maintenance
+The infrastructure helper adds `10.90.0.0/24` to the Functions VCN, creates a private subnet at `10.90.0.0/25`, and adds a dedicated NAT gateway and route table. Confirm the additional CIDR does not overlap your network or connected networks. Ensure the private subnet's applicable security rules permit DNS resolution and outbound HTTPS, and that the gateway has network connectivity to OCI Functions. Check available service limits for these resources before installation. Resource usage and network traffic can incur OCI charges.
 
-Run `python -m unittest test_app.py` and `python check_credentials.py`. The credential audit requires the configured local private key and built image layout; it checks that this key is absent and that packaged application files match the source.
+The collector currently queries Ashburn, Chicago, Phoenix, and Frankfurt. Your tenancy must be subscribed to all four regions. If you need a different set, edit `REGIONS` in `function/func.py` before building. The deployment location and registry remain Ashburn unless you also adapt the region-specific deployment scripts.
 
-Verify that the browser page loads, unauthenticated data requests receive HTTP 401, OCI sign-in succeeds, and the displayed last-pull timestamp matches the latest complete snapshot. Check filters, Excel export, and the 80% threshold. Confirm the schedule is ACTIVE and verify its first automatic run; its expression is `0 12 * * *` UTC.
+## 2. Prepare your workstation
 
-The gateway uses a static copy of the domain's public verification key. When the identity provider rotates its signing key, refresh local `public-signing-keys.json` and rerun `deploy_functions.py` to update the API deployment. No private key is required for token verification.
+Use macOS or Linux with Git, Python 3.11, and the OCI CLI installed. Configure the CLI's **DEFAULT** profile for the target tenancy, with `region=us-ashburn-1`, a valid API signing key, and its fingerprint. If configuration is not already present, use `oci setup config` and follow Oracle's instructions for registering the public API key.
 
-Deployment helpers retain identifiers to avoid recreating tracked resources, but are not a general infrastructure reconciliation tool. In particular, existing functions are not automatically updated to a new image by `deploy_functions.py`; use the OCI Functions update API or CLI to update all three functions to the newly verified image and digest for later releases. Preserve local state securely and inspect changes before rerunning deployment scripts.
+Keep `~/.oci/config` and its private key outside this repository. Confirm that a simple OCI CLI read works before continuing. The helpers use the DEFAULT profile; setting the CLI's `--profile` for another command does not change their profile.
 
-OAuth authorization requests use the full scope URL, while the issued access token contains the resource-relative scope `read`. The gateway requires `read` through route authorization and independently validates the exact API audience, issuer, signature, and expiry.
+```sh
+git clone https://github.com/chill78023/OCI_API_Limits_Check.git
+cd OCI_API_Limits_Check
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r function/requirements.txt
+python -m unittest test_app.py
+```
 
-## Manual data refresh
+Run all remaining commands from this repository root with the environment activated. Docker and the Fn CLI are not required by the included image-packaging workflow. The image targets Linux AMD64, including when built on an Apple Silicon workstation.
 
-The authenticated **Update service limits** button invokes the collector in detached mode, then polls a small status response while retaining the previous complete snapshot. Successful completion reloads the data and last-pull timestamp. Failures retain the previous snapshot. Reloading the page resumes status monitoring for an active pull.
+## 3. Supply existing resource information
 
-The API function requires `COLLECTOR_FUNCTION_ID` and `COLLECTOR_INVOKE_ENDPOINT`, plus an exact-function invocation policy. The collector requires read access to its private snapshot bucket to acquire a conditional status-object lease. Conditional writes prevent concurrent scheduled and manual pulls from collecting simultaneously. A lease expires after 20 minutes, exceeding the configured 15-minute detached function timeout. Daily scheduling remains active.
+```sh
+cp infrastructure-inventory.example.json infrastructure-inventory.json
+```
+
+Edit `infrastructure-inventory.json` and replace every placeholder:
+
+- `compartment_id`: the OCID of your `Sandbox` compartment.
+- `vcn_id`: the OCID of the Functions VCN.
+- `display_name` under `subnets`: retain `FunctionSubnet`; confirm that subnet exists.
+- Gateway `id`: the OCID of your dedicated public gateway.
+- Gateway `hostname`: its OCI hostname, without `https://` or a path.
+- Gateway `display_name`: retain `test gateway`.
+- Identity-domain `url`: its HTTPS URL, without a trailing slash.
+- `dashboard_user_name`: the exact identity-domain username to authorize.
+
+Use the example file's JSON structure. Do not put a private key, password, or client secret in this file. Local inventory and deployment-state files are ignored by Git.
+
+## 4. Create infrastructure and browser sign-in
+
+```sh
+python setup_infrastructure.py
+```
+
+This creates the private bucket and registry, private function network, Functions application, public PKCE OAuth client, API resource registration, and user assignment. It saves generated identifiers in `deployment.json`; preserve this file securely. Do not replace it with state from another installation.
+
+The browser redirect and landing URL are the gateway hostname followed by `/oci-limits/`. The API path is `/oci-limits-data/`. The OAuth resource audience is `https://oci-limits-dashboard.sandbox/`, and the requested scope is that audience followed by `read`. The issued token's scope is `read`; the API gateway checks it together with the exact audience.
+
+This step does not deploy the function image or produce a data snapshot yet.
+
+## 5. Retrieve public token-verification keys
+
+Use authorized identity-domain access to retrieve the domain's public signing keys. The following workstation-only command signs the request using your existing local configuration. It writes only public RSA verification fields to the ignored `public-signing-keys.json` file.
+
+```sh
+python - <<'PYKEYS'
+import json
+from pathlib import Path
+import oci
+from oci._vendor import requests
+from oci_local_access import config
+
+state = json.loads(Path('deployment.json').read_text())
+signer = oci.signer.Signer(
+    tenancy=config['tenancy'], user=config['user'],
+    fingerprint=config['fingerprint'],
+    private_key_file_location=config['key_file'],
+    pass_phrase=config.get('pass_phrase'))
+result = requests.get(
+    state['identity_domain_url'].rstrip('/') + '/admin/v1/SigningCert/jwk',
+    auth=signer, timeout=30)
+result.raise_for_status()
+keys = []
+for key in result.json()['keys']:
+    if key.get('kty') != 'RSA' or key.get('alg', 'RS256') != 'RS256':
+        continue
+    keys.append({**{name: key[name] for name in ('kid', 'kty', 'n', 'e')},
+                 'alg': 'RS256'})
+if not 1 <= len(keys) <= 10:
+    raise RuntimeError('Expected 1–10 supported RSA verification keys')
+Path('public-signing-keys.json').write_text(json.dumps({'keys': keys}, indent=2))
+print('Public verification keys saved; no private key was exported.')
+PYKEYS
+```
+
+If the request returns 401 or 403, have the identity-domain administrator provide the JWKS or the required administrative access. Leave the domain-wide anonymous signing-certificate setting unchanged. The gateway uses its local public-key copy.
+
+## 6. Build and upload the function image
+
+```sh
+python inspect_build.py
+python prepare_dependencies.py
+python package_image.py --push --tag initial-install-v1
+```
+
+The first command retrieves the official Fn Python 3.11 runtime manifest. The second downloads the pinned Linux dependencies into `build/python`. The third builds the image, checks for the configured private key and credential paths, and uploads the image to the private Ashburn registry. Stop if the audit reports findings.
+
+Only the runtime layers, dependencies, and three files under `function/` enter the image. Workstation configuration, inventory, deployment state, and private keys are excluded. Registry upload uses a signed short-lived token, so this workflow does not require putting a registry password in source code. `deployment.json` records the image tag and digest.
+
+## 7. Deploy the functions, API, schedule, and logging
+
+```sh
+python deploy_functions.py
+python enable_logs.py
+python enable_gateway_https.py
+```
+
+The function deployment creates:
+
+| Function | Purpose | Memory | Timeout |
+| --- | --- | --- | --- |
+| `oci-limits-web` | Browser page and OAuth code exchange | 256 MB | 30 seconds |
+| `oci-limits-api` | Authenticated snapshot, export, refresh request, and status | 512 MB | 60 seconds |
+| `oci-limits-collector` | Read OCI limits and usage; publish a complete snapshot | 1,024 MB | 300 seconds sync; 900 seconds detached |
+
+The scripts also configure exact-function dynamic groups and policies, JWT authentication, scope authorization, a private snapshot bucket, and daily detached collection. The API gets `COLLECTOR_FUNCTION_ID` and `COLLECTOR_INVOKE_ENDPOINT` and may invoke only that collector. The collector may read limits and usage and read/write its named snapshot bucket. The web function has no snapshot-reading permission.
+
+Invocation logs retain diagnostics for 30 days. The HTTPS helper attaches TCP 443 ingress to the gateway through a dedicated network security group. The data API continues to require a valid signed token with the correct audience and `read` scope. Allow time for IAM memberships and policy updates to propagate before the first invocation.
+
+## 8. Populate the first snapshot
+
+You can sign in and select **Update service limits** once a snapshot exists. For the initial installation, invoke the collector from your workstation to create that first snapshot:
+
+```sh
+python - <<'PYFIRST'
+import json
+from pathlib import Path
+import oci
+from oci_local_access import client, config
+
+state = json.loads(Path('deployment.json').read_text())
+function = client(oci.functions.FunctionsManagementClient).get_function(
+    state['collector_function_id']).data
+invoke = oci.functions.FunctionsInvokeClient(
+    config, service_endpoint=function.invoke_endpoint, timeout=(10, 30))
+invoke.invoke_function(function.id, invoke_function_body=b'{}',
+                       fn_invoke_type='detached')
+print('Collection accepted. Check status after a few minutes.')
+PYFIRST
+```
+
+Detached acceptance means collection has started or been queued; it does not confirm completion. Check the private status object:
+
+```sh
+python - <<'PYSTATUS'
+import json
+from pathlib import Path
+import oci
+from oci_local_access import client
+
+state = json.loads(Path('deployment.json').read_text())
+store = client(oci.object_storage.ObjectStorageClient)
+result = store.get_object(state['namespace'], state['bucket'],
+                          'refresh-status.json')
+print(json.dumps(json.loads(result.data.content), indent=2))
+PYSTATUS
+```
+
+Repeat the status check as needed until `status` is `Succeeded`. Check that `snapshot.json` exists in the same private bucket. If the status is `Failed`, inspect the collector's invocation log, correct the cause, and invoke it again. A complete pull can take several minutes. Existing snapshots are retained if a later pull fails.
+
+## 9. Open and verify the application
+
+Print the URL, then open it in your browser:
+
+```sh
+python - <<'PYURL'
+import json
+from pathlib import Path
+print(json.loads(Path('deployment.json').read_text())['app_url'])
+PYURL
+```
+
+Sign in as the user assigned during installation and complete any required MFA. Verify:
+
+1. The title is **Service Limits Utilization Dashboard**.
+2. Limits, current use, utilization, and the last-pull timestamp appear.
+3. Filters and **Download Excel** work; utilization of 80% or more is red.
+4. **Update service limits** shows progress, retains the old snapshot during collection, and changes the timestamp after success. **Reload snapshot** only rereads saved data.
+5. In the OCI Console, the Resource Scheduler schedule `oci-limits-daily-refresh` is ACTIVE. Confirm that the next daily run completes; the schedule uses `0 12 * * *` UTC. Browser timestamps use the browser's local timezone.
+6. An anonymous request to the data endpoint is denied. You can run this read-only check:
+
+```sh
+python - <<'PYANON'
+import json
+from pathlib import Path
+from oci._vendor import requests
+state = json.loads(Path('deployment.json').read_text())
+result = requests.post(state['api_url'], json={'action': 'snapshot'}, timeout=30)
+print('Anonymous response:', result.status_code)
+assert result.status_code == 401
+PYANON
+```
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Hostname does not resolve / `NXDOMAIN` | Verify the hostname in `deployment.json` against the gateway. Check DNS on the affected network before changing the application or OAuth settings. |
+| OCI sign-in succeeds but the API returns 401/403 | Check the user assignment, exact redirect URL, token audience, issuer, public signing key, and the resource-relative scope `read`. Check gateway execution logs if enabled. |
+| First pull fails with 401/403/404 | Check IAM propagation and the collector's limits/resource-availability and bucket permissions. Check all configured regions are subscribed. |
+| Manual update cannot start | Check both collector environment variables and the API dynamic group's permission to invoke the exact collector. |
+| Update remains Running | Check collector logs. The function's detached timeout is 15 minutes; the concurrency lease expires after 20 minutes. Avoid editing a valid active lease. |
+| Container build/push fails | Check outbound HTTPS to Docker Hub, PyPI and OCIR, registry permissions, and the credential-audit output. |
+| HTTPS helper refuses the gateway | Use a dedicated gateway containing only the two dashboard deployments; retain the guard. |
+| Existing snapshot remains after an error | This is expected: unsuccessful collection does not replace the last complete snapshot. |
+
+## Upgrades, key rotation, and local state
+
+Use a new image tag for every release, rerun tests and the image audit, and upload the new image. **`deploy_functions.py` does not change existing functions to a newly built image.** Update all three functions through the OCI Console or Functions update API to the new image reference and digest in local `deployment.json`; preserve their role-specific configurations, including the API's collector settings. Verify one manual refresh after an upgrade.
+
+When the identity domain rotates its signing keys, repeat step 5 and rerun `deploy_functions.py` to update the API gateway's verification keys. The current helper also reconciles its runtime policy and API collector environment variables. Review the planned change and keep local state intact.
+
+Keep `deployment.json`, inventory, state files, `.oci` files, and private keys out of Git. Back up local deployment state securely. The scripts are tailored deployment helpers, not a general infrastructure reconciliation or automated uninstall system. Changing compartment names, deployment region, registry hostname, CIDRs, or resource names requires reviewing the relevant scripts and IAM statements together.
+
+## Oracle references
+
+- [Configure an OCI API signing key](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm)
+- [Identity-domain APIs with an OCI API signing key](https://docs.oracle.com/en/learn/ociiam-id-restapi/index.html)
+- [Invoking OCI Functions, including detached invocation](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionsinvokingfunctions.htm)
+- [API Gateway token and scope authorization](https://docs.oracle.com/en-us/iaas/Content/APIGateway/Tasks/apigatewayusingjwttokens-requestpolicy.htm)

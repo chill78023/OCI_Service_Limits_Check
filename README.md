@@ -27,4 +27,4 @@ python -m pip install -r function/requirements.txt
 python -m unittest test_app.py
 ```
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for deployment prerequisites, scripts, and verification. This repository contains source code only; account inventory, usage snapshots, and existing deployment identifiers are not published.
+For a complete first installation, follow the [OCI installation guide](DEPLOYMENT.md), including prerequisites, copyable deployment commands, sign-in setup, initial collection, verification, and troubleshooting. This repository contains source code only; account inventory, usage snapshots, and existing deployment identifiers are not published.
