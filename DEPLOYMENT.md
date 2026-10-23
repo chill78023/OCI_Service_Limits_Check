@@ -33,3 +33,5 @@ Verify that the browser page loads, unauthenticated data requests receive HTTP 4
 The gateway uses a static copy of the domain's public verification key. When the identity provider rotates its signing key, refresh local `public-signing-keys.json` and rerun `deploy_functions.py` to update the API deployment. No private key is required for token verification.
 
 Deployment helpers retain identifiers to avoid recreating tracked resources, but are not a general infrastructure reconciliation tool. In particular, existing functions are not automatically updated to a new image by `deploy_functions.py`; use the OCI Functions update API or CLI to update all three functions to the newly verified image and digest for later releases. Preserve local state securely and inspect changes before rerunning deployment scripts.
+
+OAuth authorization requests use the full scope URL, while the issued access token contains the resource-relative scope `read`. The gateway requires `read` through route authorization and independently validates the exact API audience, issuer, signature, and expiry.

@@ -47,12 +47,12 @@ for role,prefix in [('web','/oci-limits'),('api','/oci-limits-data')]:
     if role=='api':
         authentication=M.JwtAuthenticationPolicy(token_header='Authorization',token_auth_scheme='Bearer',is_anonymous_access_allowed=False,
             issuers=['https://identity.oraclecloud.com','https://identity.oraclecloud.com/'],audiences=[state['oauth_audience']],
-            public_keys=M.StaticPublicKeySet(keys=[M.JsonWebKey(**{**key,'key_ops':['verify']}) for key in json.load(open('public-signing-keys.json'))['keys']]),
-            verify_claims=[M.JsonWebTokenClaim(key='scope',values=[state['oauth_scope']],is_required=True)])
+            public_keys=M.StaticPublicKeySet(keys=[M.JsonWebKey(**{**key,'key_ops':['verify']}) for key in json.load(open('public-signing-keys.json'))['keys']]))
     spec=M.ApiSpecification(request_policies=M.ApiSpecificationRequestPolicies(authentication=authentication,
         rate_limiting=M.RateLimitingPolicy(rate_in_requests_per_second=10,rate_key='CLIENT_IP')),
         routes=[M.ApiSpecificationRoute(path='/',methods=['GET','POST'] if role=='web' else ['POST'],
-            backend=M.OracleFunctionBackend(function_id=state[role+'_function_id']))])
+            backend=M.OracleFunctionBackend(function_id=state[role+'_function_id']),
+            request_policies=M.ApiSpecificationRouteRequestPolicies(authorization=M.AnyOfRouteAuthorizationPolicy(allowed_scope=[state['oauth_scope'].removeprefix(state['oauth_audience'])])) if role=='api' else None)])
     existed=role+'_deployment_id' in state
     ensure(role+'_deployment_id',lambda role=role,prefix=prefix,spec=spec:dc.create_deployment(M.CreateDeploymentDetails(
         compartment_id=comp,gateway_id=state['gateway_id'],display_name='OCI Limits '+role,path_prefix=prefix,specification=spec)).data)
