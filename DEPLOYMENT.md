@@ -31,8 +31,8 @@ Use macOS or Linux with Git, Python 3.11, and the OCI CLI installed. Configure t
 Keep `~/.oci/config` and its private key outside this repository. Confirm that a simple OCI CLI read works before continuing. The helpers use the DEFAULT profile; setting the CLI's `--profile` for another command does not change their profile.
 
 ```sh
-git clone https://github.com/chill78023/OCI_API_Limits_Check.git
-cd OCI_API_Limits_Check
+git clone https://github.com/chill78023/OCI_Service_Limits_Check.git
+cd OCI_Service_Limits_Check
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -236,6 +236,30 @@ Use a new image tag for every release, rerun tests and the image audit, and uplo
 When the identity domain rotates its signing keys, repeat step 5 and rerun `deploy_functions.py` to update the API gateway's verification keys. The current helper also reconciles its runtime policy and API collector environment variables. Review the planned change and keep local state intact.
 
 Keep `deployment.json`, inventory, state files, `.oci` files, and private keys out of Git. Back up local deployment state securely. The scripts are tailored deployment helpers, not a general infrastructure reconciliation or automated uninstall system. Changing compartment names, deployment region, registry hostname, CIDRs, or resource names requires reviewing the relevant scripts and IAM statements together.
+
+## Administrator notifications at 80%
+
+After deploying the current image to all three functions, run the following from the repository root:
+
+```sh
+python setup_notifications.py --administrator-group Administrators
+```
+
+The setup helper discovers the active members of the exact IAM `Administrators` group, creates `oci-service-limits-80-alerts` in Sandbox, and creates email subscriptions for their current email addresses. It configures the collector with `NOTIFICATION_TOPIC_ID`, `NOTIFICATION_ENDPOINT`, and `NOTIFICATION_COMPARTMENT_ID`. A separate IAM policy grants the collector only `ONS_TOPIC_PUBLISH` and `ONS_SUBSCRIPTION_INSPECT` in the notification compartment. It cannot create topics or change subscriptions at runtime. The installing account needs permission to manage notification topics, subscriptions, IAM policy, and collector configuration.
+
+Each administrator must select the confirmation link in the OCI Notifications email before receiving alerts. The application checks subscription readiness on every complete pull. While no recipient is active it shows a confirmation warning and does not mark thresholds as already notified. Topic acceptance does not guarantee email delivery; OCI Notifications handles delivery to confirmed subscribers.
+
+The subject names the first affected service and limit, for example:
+
+```text
+80% of "Services Limit" reached: compute / standard-e5-core-count
+```
+
+The message body names every affected limit in that notification and includes its service, exact limit name, description, scope, region, availability domain, current use, maximum, utilization, detection timestamp, and dashboard link. A subject with multiple limits ends with a count; long subjects are shortened while complete names remain in the body. Notifications reflect completed daily or manual snapshots, not continuous monitoring between pulls.
+
+The collector notifies on the first observed breach at or above 80%. It records successful publishes in private `notification-state.json` to suppress repeated alerts while a limit remains high. An observed recovery below 80% re-arms a later crossing. Unsupported usage does not re-arm an alert. Global limits repeated by region are grouped, using their highest observed utilization. Larger sets are split below the message-size limit. OCI Notifications provides at-least-once delivery; a process or state-write failure after publishing can result in a duplicate. A notification failure is reported separately and does not discard the fresh data snapshot.
+
+Rerun the setup helper to add new administrators. Review subscriptions in OCI Notifications and remove departed recipients when administrator membership changes. Local `notification-setup-state.json` contains recipient details and must remain ignored by Git. Do not add email addresses or API keys to application source. If using a differently named IAM administrator group, pass its exact name with `--administrator-group`.
 
 ## Oracle references
 

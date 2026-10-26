@@ -3,6 +3,7 @@
 A browser dashboard hosted on OCI Functions that shows service limits, current usage, and utilization across Ashburn, Chicago, Phoenix, and Frankfurt.
 
 - Highlights utilization at or above 80% in red.
+- Sends OCI administrator email notifications naming limits that reach 80%, after each daily or manual pull.
 - Filters by region, service, search text, and alerts.
 - Exports the filtered results to Excel.
 - Refreshes daily at 12:00 UTC and displays the last successful pull.

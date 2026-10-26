@@ -143,6 +143,97 @@ def start_refresh():
         invoke_function_body=b'{}', fn_invoke_type='detached')
     return {'status': 'Accepted', 'requested_at': requested}
 
+def alert_key(row):
+    scope = row.get('scope', '')
+    return json.dumps([row.get('service'), row.get('name'), scope,
+        'GLOBAL' if scope == 'GLOBAL' else row.get('region'), row.get('availability_domain', '')])
+
+def alert_details(row):
+    ratio, above = utilization(row['limit'], row.get('current_use'))
+    percentage = f'{ratio:.1%}' if ratio is not None else 'Over limit'
+    return (f"Service: {row['service']}\nService limit: {row['name']}\n"
+        f"Description: {row.get('description', '')}\n"
+        f"Scope: {row.get('scope', '')}\nRegion: {row['region']}\n"
+        f"Availability domain: {row.get('availability_domain') or 'Not applicable'}\n"
+        f"Current use: {row['current_use']}\nService limit maximum: {row['limit']}\n"
+        f"Utilization: {percentage}\n")
+
+def notification_message(rows, snapshot):
+    first = rows[0]
+    suffix = f" (+{len(rows)-1} more)" if len(rows) > 1 else ''
+    title = ('80% of "Services Limit" reached: ' + first['service'] + ' / ' + first['name'])
+    title = title[:128-len(suffix)] + suffix
+    body = ('Service Limits Utilization Dashboard\n'
+        'One or more service limits have reached or exceeded 80% utilization.\n'
+        f"Detected at: {snapshot['last_pull_at']}\n\n" +
+        '\n'.join(alert_details(row) for row in rows) +
+        '\nOpen dashboard: ' + os.environ.get('APP_URL', '') +
+        '\nNotifications reflect completed daily or manual data pulls. '
+        'Global limits are listed once, using the highest observed utilization.\n')
+    return oci.ons.models.MessageDetails(title=title, body=body)
+
+def notify_limits(snapshot, store):
+    topic = os.environ.get('NOTIFICATION_TOPIC_ID')
+    if not topic:
+        return {'status': 'Disabled', 'published': 0}
+    signer = oci.auth.signers.get_resource_principals_signer()
+    ons = oci.ons.NotificationDataPlaneClient({}, signer=signer,
+        service_endpoint=os.environ['NOTIFICATION_ENDPOINT'], timeout=(10, 30),
+        retry_strategy=oci.retry.NoneRetryStrategy())
+    subscribers = pages(ons.list_subscriptions, os.environ['NOTIFICATION_COMPARTMENT_ID'], topic_id=topic)
+    if not any(x.lifecycle_state == 'ACTIVE' for x in subscribers):
+        # Do not consume an alert before a recipient can receive it.
+        return {'status': 'AwaitingConfirmation', 'published': 0}
+    try:
+        state = json.loads(store.get_object(*snapshot_object('notification-state.json')).data.content)
+    except oci.exceptions.ServiceError as exc:
+        if exc.status != 404:
+            raise
+        state = {'active': {}}
+    active = state['active']
+    observed = {}
+    for row in snapshot['rows']:
+        if not isinstance(row.get('current_use'), (int, float)) or isinstance(row['current_use'], bool):
+            continue
+        key = alert_key(row)
+        previous = observed.get(key)
+        # Global limits can repeat by region; retain their highest utilization.
+        score = lambda value: (utilization(value['limit'], value['current_use'])[1],
+                              utilization(value['limit'], value['current_use'])[0] or 0)
+        if previous is None or score(row) > score(previous):
+            observed[key] = row
+    pending = []
+    for key, row in observed.items():
+        if utilization(row['limit'], row['current_use'])[1]:
+            if key not in active:
+                pending.append((key, row))
+        else:
+            active.pop(key, None)
+    def save():
+        store.put_object(*snapshot_object('notification-state.json'), json.dumps({
+            'active': active, 'checked_at': snapshot['last_pull_at']}), content_type='application/json')
+    # Batches keep messages below ONS's 64 KB limit, with full limit names in the body.
+    batches = []
+    current = []
+    for item in pending:
+        trial = current + [item]
+        if current and len(notification_message([r for _, r in trial], snapshot).body.encode()) > 50_000:
+            batches.append(current)
+            current = []
+        current.append(item)
+    if current:
+        batches.append(current)
+    for index, batch in enumerate(batches):
+        if index:
+            time.sleep(6.1)  # ONS email endpoints allow ten messages per minute.
+        result = ons.publish_message(topic, notification_message([row for _, row in batch], snapshot))
+        for key, _ in batch:
+            active[key] = {'notified_at': now(), 'message_id': result.data.message_id}
+        save()
+    if not batches:
+        save()
+    return {'status': 'Succeeded', 'published': len(pending), 'messages': len(batches)}
+
 def refresh():
     store = object_store()
     state, etag = refresh_state(store)
@@ -165,6 +256,11 @@ def refresh():
         store.put_object(*snapshot_object(), body, content_type='application/json')
         result = {'status': 'Succeeded', 'started_at': started, 'last_attempt_at': now(),
                   'last_pull_at': snapshot['last_pull_at'], 'record_count': snapshot['record_count']}
+        try:
+            result['notifications'] = notify_limits(snapshot, store)
+        except Exception:
+            LOG.exception('Administrator notification failed; snapshot remains available')
+            result['notifications'] = {'status': 'Failed'}
         store.put_object(*snapshot_object('refresh-status.json'), json.dumps(result), if_match=claim_etag)
         LOG.info('Snapshot published: %s records', snapshot['record_count'])
         return result

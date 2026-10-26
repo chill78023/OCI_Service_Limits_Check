@@ -92,4 +92,56 @@ class DashboardTests(unittest.TestCase):
             xml=archive.read('xl/worksheets/sheet1.xml').decode()
         self.assertIn('Over limit',xml)
 
+class NotificationTests(unittest.TestCase):
+    def row(self,used=80,**values):
+        return {'service':'compute','name':'standard-e5-core-count','region':'us-ashburn-1',
+                'scope':'REGION','availability_domain':'','limit':100,'current_use':used,**values}
+    def run_alerts(self,rows,active=None,confirmed=True,fail=False):
+        store=Mock();store.get_object.return_value.data.content=json.dumps({'active':active or {}}).encode()
+        ons=Mock();ons.publish_message.return_value.data.message_id='message-id'
+        if fail:ons.publish_message.side_effect=RuntimeError('publish unavailable')
+        with patch.dict(os.environ,NOTIFICATION_TOPIC_ID='topic',NOTIFICATION_ENDPOINT='https://notifications.example',NOTIFICATION_COMPARTMENT_ID='compartment',STORAGE_NAMESPACE='namespace',SNAPSHOT_BUCKET='bucket',APP_URL='https://dashboard.example'),patch.object(app.oci.auth.signers,'get_resource_principals_signer',return_value=Mock()),patch.object(app.oci.ons,'NotificationDataPlaneClient',return_value=ons),patch.object(app,'pages',return_value=[types.SimpleNamespace(lifecycle_state='ACTIVE' if confirmed else 'PENDING')]):
+            result=app.notify_limits({'rows':rows,'last_pull_at':app.now()},store)
+        return result,store,ons
+    def test_80_percent_alert_names_exact_service_limit(self):
+        result,store,ons=self.run_alerts([self.row(80)])
+        self.assertEqual(result['published'],1)
+        message=ons.publish_message.call_args.args[1]
+        self.assertEqual(message.title,'80% of "Services Limit" reached: compute / standard-e5-core-count')
+        for text in ['Current use: 80','Service limit maximum: 100','Utilization: 80.0%','us-ashburn-1','https://dashboard.example']:
+            self.assertIn(text,message.body)
+    def test_below_threshold_and_unknown_usage_do_not_notify(self):
+        result,store,ons=self.run_alerts([self.row(79),self.row(None,name='unknown')])
+        self.assertEqual(result['published'],0);ons.publish_message.assert_not_called()
+    def test_persistent_breach_does_not_repeat(self):
+        row=self.row(91);key=app.alert_key(row)
+        result,store,ons=self.run_alerts([row],{key:{'notified_at':'earlier'}})
+        self.assertEqual(result['published'],0);ons.publish_message.assert_not_called()
+    def test_recovery_rearms_next_breach(self):
+        row=self.row(50);key=app.alert_key(row)
+        result,store,ons=self.run_alerts([row],{key:{'notified_at':'earlier'}})
+        active=json.loads(store.put_object.call_args.args[3])['active'];self.assertNotIn(key,active)
+        result,_,ons=self.run_alerts([self.row(80)],active)
+        self.assertEqual(result['published'],1)
+    def test_pending_confirmation_does_not_consume_alert(self):
+        result,store,ons=self.run_alerts([self.row()],confirmed=False)
+        self.assertEqual(result['status'],'AwaitingConfirmation')
+        ons.publish_message.assert_not_called();store.put_object.assert_not_called()
+    def test_global_replicas_notify_once_at_highest_utilization(self):
+        rows=[self.row(80,scope='GLOBAL'),self.row(90,scope='GLOBAL',region='eu-frankfurt-1')]
+        result,_,ons=self.run_alerts(rows)
+        self.assertEqual(result['published'],1);self.assertIn('90.0%',ons.publish_message.call_args.args[1].body)
+    def test_multiple_breaches_name_each_limit(self):
+        result,_,ons=self.run_alerts([self.row(),self.row(85,service='vcn',name='vcn-count')])
+        self.assertEqual(result['published'],2)
+        body=ons.publish_message.call_args.args[1].body
+        self.assertIn('standard-e5-core-count',body);self.assertIn('vcn-count',body)
+    def test_delivery_failure_keeps_new_snapshot_successful(self):
+        store=Mock();store.put_object.return_value.headers={'etag':'claim'}
+        snapshot={'last_pull_at':app.now(),'record_count':1,'rows':[]}
+        with patch.dict(os.environ,STORAGE_NAMESPACE='namespace',SNAPSHOT_BUCKET='bucket'),patch.object(app,'object_store',return_value=store),patch.object(app,'refresh_state',return_value=({'status':'Idle'},None)),patch.object(app,'collect_snapshot',return_value=snapshot),patch.object(app,'notify_limits',side_effect=RuntimeError('delivery unavailable')):
+            result=app.refresh()
+        self.assertEqual(result['status'],'Succeeded');self.assertEqual(result['notifications']['status'],'Failed')
+        self.assertIn('snapshot.json',[c.args[2] for c in store.put_object.call_args_list])
+
 if __name__=='__main__':unittest.main()
